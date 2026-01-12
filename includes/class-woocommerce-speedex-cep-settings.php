@@ -8,8 +8,6 @@ class WC_Speedex_CEP_Admin_Settings {
 	public function __construct() {
 			self::$_this = $this;	
 			
-			add_action( 'admin_bar_menu', array( $this, 'speedex_cep_admin_bar' ), PHP_INT_MAX );
-			
 			add_action( 'admin_menu', array( $this, 'speedex_admin_menu') );
 		
 			add_action( 'admin_init', array( $this, 'register_speedex_settings') );
@@ -30,8 +28,9 @@ class WC_Speedex_CEP_Admin_Settings {
 	
 	function speedex_settings_admin_page() 
 	{
-		wp_enqueue_style( 'wc_speedex_cep_wc_admin_css', plugins_url( '../woocommerce/assets/css/admin.css' , dirname( __FILE__ ) ) );
-		wp_enqueue_script( 'wc_speedex_cep_date_wc_tipTip_lib', plugins_url( '../woocommerce/assets/js/jquery-tiptip/jquery.tipTip.min.js', dirname( __FILE__ ) ), array( 'jquery' )  );		
+		wp_enqueue_style( 'wc_speedex_cep_wc_admin_css', plugins_url( '../assets/css/admin.css' , __FILE__ ) );
+		// Assuming tiptip is handled by WooCommerce or provided in assets. 
+		// If not found in assets, we might need to check if it's available.
 		
 		global $woocommerce;
 		?>
@@ -78,6 +77,12 @@ class WC_Speedex_CEP_Admin_Settings {
 		<td><input type="checkbox" name="testmode"  value="1"  <?php echo $checked; ?>/></td>
 		</tr>
 		
+		<tr valign="top">
+		<th scope="row"> <label><?php _e('Αυτόματη ενημέρωση αριθμού αποστολής στο Webexpert Order Tracking:','woocommerce-speedex-cep'); echo wc_help_tip( __( 'Update the "_shipping_tracking_number" field automatically when a voucher is created.', 'woocommerce-speedex-cep' )); ?> </label></th>
+		<?php $checked_sync = ( (int)get_option ('sync_tracking') == 1 ) ? 'checked="checked"' : ''; ?>
+		<td><input type="checkbox" name="sync_tracking"  value="1"  <?php echo $checked_sync; ?>/></td>
+		</tr>
+
 		<?php $woocommerce->shipping->load_shipping_methods(); ?>
 		<tr valign="top">
 		<th scope="row">
@@ -124,8 +129,48 @@ class WC_Speedex_CEP_Admin_Settings {
 		</tr>	
 		
 		</table>
-		<?php submit_button(); ?>
+		<div class="submit">
+			<?php submit_button( '', 'primary', 'submit', false ); ?>
+			<button type="button" id="wc_speedex_cep_check_connection" class="button"><?php _e( 'Check Connection', 'woocommerce-speedex-cep' ); ?></button>
+			<span id="wc_speedex_cep_connection_status" style="margin-left: 10px; font-weight: bold;"></span>
 		</div>
+		</form>
+		</div>
+		<script type="text/javascript">
+		jQuery(document).ready(function($) {
+			$('#wc_speedex_cep_check_connection').on('click', function() {
+				var $button = $(this);
+				var $status = $('#wc_speedex_cep_connection_status');
+				
+				$button.prop('disabled', true).text('<?php _e( 'Checking...', 'woocommerce-speedex-cep' ); ?>');
+				$status.text('').css('color', 'inherit');
+				
+				$.ajax({
+					url: ajaxurl,
+					type: 'POST',
+					data: {
+						action: 'wc_speedex_cep_validate_connection',
+						username: $('input[name="username"]').val(),
+						password: $('input[name="password"]').val(),
+						testmode: $('input[name="testmode"]').is(':checked') ? 1 : 0
+					},
+					success: function(response) {
+						if (response.success) {
+							$status.text('<?php _e( 'Connection Successful!', 'woocommerce-speedex-cep' ); ?>').css('color', 'green');
+						} else {
+							$status.text('<?php _e( 'Connection Failed: ', 'woocommerce-speedex-cep' ); ?>' + (response.data ? response.data.message : '<?php _e( 'Unknown error', 'woocommerce-speedex-cep' ); ?>')).css('color', 'red');
+						}
+					},
+					error: function() {
+						$status.text('<?php _e( 'An error occurred during validation.', 'woocommerce-speedex-cep' ); ?>').css('color', 'red');
+					},
+					complete: function() {
+						$button.prop('disabled', false).text('<?php _e( 'Check Connection', 'woocommerce-speedex-cep' ); ?>');
+					}
+				});
+			});
+		});
+		</script>
 	<?php 
 	}
 	
@@ -136,6 +181,7 @@ class WC_Speedex_CEP_Admin_Settings {
 		register_setting( 'speedex-cep-group', 'agreement_id' );
 		register_setting( 'speedex-cep-group', 'branch_id' ); 	
 		register_setting( 'speedex-cep-group', 'testmode' );
+		register_setting( 'speedex-cep-group', 'sync_tracking' );
 		register_setting( 'speedex-cep-group', 'methods' );
 		register_setting( 'speedex-cep-group', 'order-statuses' );
 		

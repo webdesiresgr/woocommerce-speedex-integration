@@ -11,32 +11,47 @@ class WC_Speedex_CEP_Admin {
 		add_action( 'admin_enqueue_scripts', array( $this, 'load_admin_scripts' ) );
 
 		add_action( 'wp_ajax_wc_speedex_cep_cancel_bol', array( $this, 'cancelBol' ) );
-
 		add_action( 'wp_ajax_wc_speedex_cep_get_bol_pdf', array( $this, 'getBolPdf' ) );
-		
 		add_action( 'wp_ajax_wc_speedex_cep_manually_create_bol', array( $this, 'manuallyCreateBol' ) );
-
 		add_action( 'wp_ajax_wc_speedex_cep_get_bol_summary_pdf', array( $this, 'getBolSummaryPdf' ) );
+		add_action( 'wp_ajax_wc_speedex_cep_validate_connection', array( $this, 'validateConnection' ) );
 		
 		add_action( 'add_meta_boxes', array( $this, 'speedex_add_meta_boxes' ) );
 		
-	
 		$sel_statuses = get_option( 'order-statuses' );
-		if ( !empty( $sel_statuses ) ) {
+		if ( !empty( $sel_statuses ) && is_array( $sel_statuses ) ) {
 			foreach ( $sel_statuses as $status ){
-				add_action( 'woocommerce_order_status_'.$status, array( $this, 'autoCreateBol' ) );
+				add_action( 'woocommerce_order_status_' . $status, array( $this, 'autoCreateBol' ) );
 			}
 		}
+	}
 
+	/**
+	 * Centralized SOAP Client helper
+	 */
+	private function get_soap_client() {
+		$url = ( get_option( 'testmode' ) != 1 ) ? 'https://spdxws.gr/accesspoint.asmx' : 'https://devspdxws.gr/accesspoint.asmx';
+		$options = array(
+			'cache_wsdl' => WSDL_CACHE_BOTH, // Optimization: Use cache for speed
+			'encoding'   => 'UTF-8',
+			'exceptions' => true,
+			'trace'      => 1
+		);
+		return new SoapClient( $url . "?WSDL", $options );
 	}
 	
-	function load_admin_scripts()
+	
+	function load_admin_scripts( $hook )
 	{
-		$suffix = '';
+		// Only load scripts on the relevant WooCommerce order pages
+		$allowed_hooks = array( 'post.php', 'post-new.php', 'woocommerce_page_wc-orders' );
+		if ( ! in_array( $hook, $allowed_hooks ) ) {
+			return;
+		}
 
 		wp_enqueue_script( 'wc_speedex_cep_loadingoverlay_lib_js', plugins_url( 'assets/libs/loadingoverlay/loadingoverlay.min.js' , dirname( __FILE__ ) ), array( 'jquery' ) );
 		wp_enqueue_script( 'wc_speedex_cep_goodpopup_lib_js', plugins_url( 'assets/libs/jquery.goodpopup/js/script.min.js' , dirname( __FILE__ ) ), array( 'jquery' ) );
-		wp_enqueue_script( 'wc_speedex_cep_admin_order_page_script', plugins_url( 'assets/js/admin' . $suffix . '.js' , dirname( __FILE__ ) ), array( 'jquery' ) );
+		wp_enqueue_script( 'wc_speedex_cep_admin_order_page_script', plugins_url( 'assets/js/admin.js' , dirname( __FILE__ ) ), array( 'jquery' ), '1.0.0', true );
 				
 		$localized_vars = array(
 			'ajaxurl'                   		=> admin_url( 'admin-ajax.php' ),
@@ -45,20 +60,21 @@ class WC_Speedex_CEP_Admin {
 			'ajaxAdminManuallyCreateBolNonce'   => wp_create_nonce( '_wc_speedex_cep_manually_create_bol' ),
 			'ajaxAdminGetBolSummaryPdfNonce'   	=> wp_create_nonce( '_wc_speedex_cep_get_bol_summary_pdf' ),
 			'invalidPdfError'					=> __( 'Download failed. An error occured.', 'woocommerce-speedex-cep' ),
-			'ajaxErrorMessage'					=> __( 'An network error occured.', 'woocommerce-speedex-cep' ),
+			'ajaxErrorMessage'					=> __( 'A network error occured.', 'woocommerce-speedex-cep' ),
 			'ajaxGetBolSummaryPdfError'			=> __( 'Voucher list failed to download because the pdf is invalid.','woocommerce-speedex-cep' ),
 		);
 		
 		wp_localize_script( 'wc_speedex_cep_admin_order_page_script', 'wc_speedex_cep_local', $localized_vars );
 		wp_enqueue_style( 'wc_speedex_cep_goodpopup_lib_css', plugins_url( 'assets/libs/jquery.goodpopup/css/style.min.css' , dirname( __FILE__ ) ) );
 		wp_enqueue_style( 'wc_speedex_cep_admin_style', plugins_url( 'assets/css/admin.css', dirname( __FILE__ ) ) );
-		
-		return true;
 	}
 	
 	function autoCreateBol( $order_id )
 	{
-		$speedex_post_meta = get_post_meta( $order_id, '_speedex_voucher_code', true );
+		$order = wc_get_order( $order_id );
+		if ( ! $order ) return;
+		
+		$speedex_post_meta = $order->get_meta( '_speedex_voucher_code', true );
 		if ( empty( $speedex_post_meta ) ) {
 			$this->createBol( $order_id );
 		}
@@ -66,76 +82,72 @@ class WC_Speedex_CEP_Admin {
 	
 	function getBolSummaryPdf( $beginDate = 0, $endDate = 0 )
 	{
-		$nonce = $_POST['ajaxAdminGetBolSummaryPdfNonce'];
-		if ( ! wp_verify_nonce( $nonce, '_wc_speedex_cep_get_bol_summary_pdf' ) ) {
-		     die ( 'error' );	
+		check_ajax_referer( '_wc_speedex_cep_get_bol_summary_pdf', 'ajaxAdminGetBolSummaryPdfNonce' );
+
+		if ( ! current_user_can( 'manage_woocommerce' ) ) {
+			wp_send_json_error( array( 'message' => __( 'Insufficient permissions.', 'woocommerce-speedex-cep' ) ) );
 		}
-		
-		$options = array(
-			'cache_wsdl' => WSDL_CACHE_NONE,
-			'encoding' => 'UTF-8',
-			'exceptions' => true,
-		);
-		
-		$url = ( get_option( 'testmode' ) != 1 ) ? 'http://www.speedex.gr/accesspoint/accesspoint.asmx' : 'http://www.speedex.gr/AccessPointTest/AccessPoint.asmx';
-		$soap_client = new SoapClient( $url."?WSDL", $options );
-		
-		$beginDate = empty( $beginDate ) ? mktime( 0, 0, 0, date( 'n' ), date( 'j' ) ) : $beginDate;
-		$endDate = empty( $endDate ) ?  time() : $endDate; //(mktime(0, 0, 0, date('n'), date('j') + 1) - 1)
 		
 		try
 		{	
+			$soap_client = $this->get_soap_client();
+			$beginDate = empty( $beginDate ) ? mktime( 0, 0, 0, date( 'n' ), date( 'j' ) ) : $beginDate;
+			$endDate = empty( $endDate ) ?  time() : $endDate;
+
 			$session_id_response = $this->getSession( $soap_client );
 			if ( $session_id_response['status'] === 'success' ) {
 				$session_id = $session_id_response['session_id'];
 			}
 			else {
-				echo json_encode( array(
+				wp_send_json( array(
 					'status' => 'fail',
 					'message' => $session_id_response['message'],
 					'base64string' => ''
 				));
-				exit;
 			}
 			
 			$get_bol_summary_pdf_response = $soap_client->GetBOLSummaryPdf( array( "sessionID" => $session_id, "beginDate" => $beginDate, "endDate" => $endDate));
+			
+			// Always destroy session
+			$this->destroySession( $session_id, $soap_client );
+
 			if ( $get_bol_summary_pdf_response->returnCode != 1 ) {
-				$this->destroySession( $session_id, $soap_client );
-				echo json_encode( array( 
+				wp_send_json( array( 
 					'status' => 'fail',
 					'message' => sprintf( __( 'Voucher summary list pdf failed to download. Error Code: %s Error Message: %s', 'woocommerce-speedex-cep' ), $get_bol_summary_pdf_response->returnCode, $get_bol_summary_pdf_response->returnMessage ),
 					'base64string' => ''
-				));				
-				exit;
-			}else
-			{
+				));
+			} else {
 				$base64_pdf_string = $get_bol_summary_pdf_response->GetBOLSummaryPdfResult;
-				
-				echo json_encode( array( 
+				wp_send_json( array( 
 					'status' => 'success',
 					'message' => '',
 					'base64string' => base64_encode( $base64_pdf_string )
-				));	
-				exit;
+				));
 			}
-		}catch ( Exception $e ) {
-			echo json_encode( array( 
+		} catch ( Exception $e ) {
+			wp_send_json( array( 
 					'status' => 'fail',
 					'message' => $e->getMessage(),
 					'base64string' => ''
 				));	
-			exit;
 		}
-		
 	}
 	
 	function manuallyCreateBol()
 	{
-		$nonce = $_POST['ajaxAdminManuallyCreateBolNonce'];
-		if ( ! wp_verify_nonce( $nonce, '_wc_speedex_cep_manually_create_bol' ) ) {
-		     die ( 'error' );	
+		check_ajax_referer( '_wc_speedex_cep_manually_create_bol', 'ajaxAdminManuallyCreateBolNonce' );
+
+		if ( ! current_user_can( 'manage_woocommerce' ) ) {
+			wp_send_json_error( array( 'message' => __( 'Insufficient permissions.', 'woocommerce-speedex-cep' ) ) );
 		}
-		$create_bol_result = $this->createBol( $_POST['post_id_number'] );
+
+		$order_id = isset( $_POST['post_id_number'] ) ? absint( $_POST['post_id_number'] ) : 0;
+		if ( ! $order_id ) {
+			wp_send_json_error( array( 'message' => __( 'Invalid order ID.', 'woocommerce-speedex-cep' ) ) );
+		}
+
+		$create_bol_result = $this->createBol( $order_id );
 		if ( $create_bol_result['status'] === 'success' ) {
 			$response = array(
 				'status' => 'success',
@@ -148,162 +160,172 @@ class WC_Speedex_CEP_Admin {
 				'message' => $create_bol_result['message']
 			);
 		}	
-		echo json_encode( $response );
-		exit;
+		wp_send_json( $response );
 	}
 	
 	function getBolPdf()
 	{
-		$nonce = $_POST['ajaxAdminGetBOLPdfNonce'];
-		if ( ! wp_verify_nonce( $nonce, '_wc_speedex_cep_get_bol_pdf' ) ) {
-		     die ( 'error' );	
+		check_ajax_referer( '_wc_speedex_cep_get_bol_pdf', 'ajaxAdminGetBOLPdfNonce' );
+
+		if ( ! current_user_can( 'manage_woocommerce' ) ) {
+			wp_send_json_error( array( 'message' => __( 'Insufficient permissions.', 'woocommerce-speedex-cep' ) ) );
 		}
-		$options = array(
-			'cache_wsdl' => WSDL_CACHE_NONE,
-			'encoding' => 'UTF-8',
-			'exceptions' => true,
-		);
-		$url = ( get_option( 'testmode' ) != 1 ) ? 'http://www.speedex.gr/accesspoint/accesspoint.asmx' : 'http://www.speedex.gr/AccessPointTest/AccessPoint.asmx';
-		$voucher_code = $_POST[ 'voucher_code' ];
-		$soap_client = new SoapClient( $url."?WSDL", $options );
+
+		$voucher_code = isset( $_POST['voucher_code'] ) ? sanitize_text_field( $_POST['voucher_code'] ) : '';
+		if ( ! $voucher_code ) {
+			wp_send_json_error( array( 'message' => __( 'Invalid voucher code.', 'woocommerce-speedex-cep' ) ) );
+		}
 
 		try
 		{	
+			$soap_client = $this->get_soap_client();
 			$session_id_response = $this->getSession( $soap_client );
+			
 			if ( $session_id_response['status'] === 'success' ) {
 				$session_id = $session_id_response['session_id'];
 			}
 			else {
-				echo json_encode( array(
+				wp_send_json( array(
 					'status' => 'fail',
 					'message' => $session_id_response['message'],
 					'base64array' => array()
 				));
-				exit;
 			}
 
-			$get_bol_pdf_response = $soap_client->GetBOLPdf( array( "sessionID" => $session_id, "voucherIDs" => array ($voucher_code ), "perVoucher" => true, "paperType" => 1)); // Option gia paper type?
-			if ($get_bol_pdf_response->returnCode != 1) {
-				$this->destroySession( $session_id, $soap_client );
-				echo json_encode( array( 
+			$get_bol_pdf_params = array( 
+				"sessionID" => $session_id, 
+				"voucherIDs" => array( "string" => array( $voucher_code ) ), 
+				"perVoucher" => true, 
+				"paperType" => 1
+			);
+			
+			$get_bol_pdf_response = $soap_client->GetBOLPdf( $get_bol_pdf_params );
+			
+			$this->destroySession( $session_id, $soap_client );
+
+			if ( $get_bol_pdf_response->returnCode != 1 ) {
+				wp_send_json( array( 
 					'status' => 'fail',
-					'message' => sprintf( __( 'Voucher\'s pdf file failed to download. Error Code: %s Error Message: %s', 'woocommerce-speedex-cep' ), $get_bol_summary_pdf_response->returnCode, $get_bol_summary_pdf_response->returnMessage ),
+					'message' => sprintf( __( 'Voucher\'s pdf file failed to download. Error Code: %s Error Message: %s', 'woocommerce-speedex-cep' ), $get_bol_pdf_response->returnCode, $get_bol_pdf_response->returnMessage ),
 					'base64array' => array()
 				));
-				exit;
 			} else {
 				$base64array = array();
-				foreach( $get_bol_pdf_response->GetBOLPdfResult as $result )
-				{
-					$base64array[] = base64_encode( $result->pdf );
+				$results = $get_bol_pdf_response->GetBOLPdfResult;
+				
+				if ( isset( $results->Voucher ) ) {
+					$vouchers = is_array( $results->Voucher ) ? $results->Voucher : array( $results->Voucher );
+					foreach( $vouchers as $v )
+					{
+						if ( isset( $v->pdf ) ) {
+							$base64array[] = base64_encode( $v->pdf );
+						}
+					}
 				}
+				
 				if ( empty( $base64array ) ) {
-					echo json_encode( array( 
+					wp_send_json( array( 
 						'status' => 'fail',
-						'message' => __( 'No vouchers found for this voucher code.', 'woocommerce-speedex-cep' ),
+						'message' => __( 'No PDF content found for this voucher code.', 'woocommerce-speedex-cep' ),
 						'base64array' => array()
 					));
-					exit;
 				}
 				else {
-					echo json_encode( array( 
+					wp_send_json( array( 
 						'status' => 'success',
 						'message' => '',
 						'base64array' => $base64array
 					));
-				exit;
 				}
 			}
-		}catch ( Exception $e ) {
-			echo json_encode( array( 
+		} catch ( Exception $e ) {
+			wp_send_json( array( 
 					'status' => 'fail',
 					'message' => $e->getMessage(),
 					'base64array' => array()
 				));
-			exit;
 		}
 	}
 
 	function cancelBol()
 	{
-		$nonce = $_POST['ajaxAdminCancelBOLNonce'];
-		if ( ! wp_verify_nonce( $nonce, '_wc_speedex_cep_cancel_bol_nonce' ) ) {
-		     die ( 'error' );	
+		check_ajax_referer( '_wc_speedex_cep_cancel_bol_nonce', 'ajaxAdminCancelBOLNonce' );
+
+		if ( ! current_user_can( 'manage_woocommerce' ) ) {
+			wp_send_json_error( array( 'message' => __( 'Insufficient permissions.', 'woocommerce-speedex-cep' ) ) );
 		}
 
-		if ( !isset ( $_POST['post_id_number'] ) || !isset ( $_POST[ 'voucher_code' ] ) ) {
-			echo json_encode( array(
+		$order_id = isset( $_POST['post_id_number'] ) ? absint( $_POST['post_id_number'] ) : 0;
+		$voucher_code = isset( $_POST['voucher_code'] ) ? sanitize_text_field( $_POST['voucher_code'] ) : '';
+
+		if ( ! $order_id || ! $voucher_code ) {
+			wp_send_json( array(
 				'status' => 'fail',
-				'message' => __( 'Cannot cancel the voucher. An error occured.','wc_speedex_cep_cancel' )
+				'message' => __( 'Cannot cancel the voucher. Invalid request data.', 'woocommerce-speedex-cep' )
 			));
-			exit;
 		}
 		
-		$order = wc_get_order( $_POST['post_id_number'] );
-		$voucher_code = $_POST['voucher_code'];
+		$order = wc_get_order( $order_id );
 		if( $order ) {
-			$options = array(
-				'cache_wsdl'=>WSDL_CACHE_NONE,
-				'encoding'=>'UTF-8',
-				'exceptions'=>true,
-			);
-			$url = ( get_option('testmode') != 1 ) ? 'http://www.speedex.gr/accesspoint/accesspoint.asmx' : 'http://www.speedex.gr/AccessPointTest/AccessPoint.asmx';
-
-			$soap_client = new SoapClient( $url."?WSDL", $options );
 			try
 			{	
+				$soap_client = $this->get_soap_client();
 				$session_id_response = $this->getSession( $soap_client );
+
 				if ( $session_id_response['status'] === 'success' ) {
 					$session_id = $session_id_response['session_id'];
 				}
 				else {
-					return json_encode( array (
+					wp_send_json( array (
 						'status' => 'fail',
 						'message' => $session_id_response['message']
 					) );
-					exit;
 				}
 				
-				$is_woocommerce_shipping_tracking_active = is_plugin_active( 'woocommerce-shipping-tracking/shipping-tracking.php' );
-				if ( !( function_exists( 'save_shippings_info_metas' ) || class_exists( 'WCST_Order' ) ) ) {
-					require_once( ABSPATH . '/wp-content/plugins/woocommerce-shipping-tracking/classes/com/WCST_Order.php' );
-				}
-
 				$cancel_bol_response = $soap_client->CancelBOL( array( "sessionID" => $session_id, "voucherID" => $voucher_code ) );
+				$this->destroySession( $session_id, $soap_client );
+
 				if ( $cancel_bol_response->returnCode != 1 ) {
 					if( $cancel_bol_response->returnCode == 603 ) {
-						$response = array(
+						// Shipment doesn't exist at Speedex, but we should remove it locally
+						$this->remove_local_voucher_meta( $order, $voucher_code );
+
+						wp_send_json( array(
 							'status' => 'fail',
-							'message' => __( 'Speedex respond that shipment does not exist. This voucher got deleted from this order. The page will refresh shortly.','woocommerce-speedex-cep' )
-						);
-						
-						delete_post_meta( $_POST['post_id_number'], '_speedex_voucher_code', $voucher_code );
-						if( $is_woocommerce_shipping_tracking_active ) { 
-							delete_post_meta( $_POST['post_id_number'], '_wcst_order_trackno', $voucher_code ); 
-						}
+							'message' => __( 'Speedex respond that shipment does not exist. This voucher got deleted from this order. The page will refresh shortly.', 'woocommerce-speedex-cep' )
+						));
 					} else {
 						throw new Exception( sprintf( __( 'Could not cancel Voucher. Error Code: %s Error Message: %s', 'woocommerce-speedex-cep' ), $cancel_bol_response->returnCode, $cancel_bol_response->returnMessage ) );
 					}		
 				} else {
-					if( $is_woocommerce_shipping_tracking_active ) { 
-						delete_post_meta($_POST['post_id_number'],'_wcst_order_trackno', $voucher_code ); 
-					}
-					delete_post_meta( $_POST['post_id_number'], '_speedex_voucher_code', $voucher_code );
-					$response = array(
+					$this->remove_local_voucher_meta( $order, $voucher_code );
+
+					wp_send_json( array(
 						'status' => 'success',
 						'message' => __( 'This voucher is successfully deleted. The page will refresh shortly.', 'woocommerce-speedex-cep' )
-					);
+					));
 				}
-			}catch ( Exception $e ) {
-				$response = array(
+			} catch ( Exception $e ) {
+				wp_send_json( array(
 					'status' => 'fail',
-					'message' => $e->getMessage().__( 'The page will refresh shortly.', 'woocommerce-speedex-cep' )
-				);
+					'message' => $e->getMessage() . ' ' . __( 'The page will refresh shortly.', 'woocommerce-speedex-cep' )
+				));
 			}
-			$this->destroySession( $session_id, $soap_client );
-			echo json_encode( $response );
-			exit;
 		}
+	}
+
+	/**
+	 * Helper to remove voucher meta correctly for HPOS/Traditional
+	 */
+	private function remove_local_voucher_meta( $order, $voucher_code ) {
+		$all_meta = $order->get_meta_data();
+		foreach ( $all_meta as $meta ) {
+			if ( $meta->key === '_speedex_voucher_code' && $meta->value === $voucher_code ) {
+				$order->delete_meta_data_by_mid( $meta->id );
+				break;
+			}
+		}
+		$order->save();
 	}
 
 	function splitCommentsToArray( $comments ) {
@@ -366,43 +388,75 @@ class WC_Speedex_CEP_Admin {
 				'message' => __( 'Voucher creation is not available for the selected shipping method of this order.', 'woocommerce-speedex-cep' )
 			);
 		}
-		$options = array(
-			'cache_wsdl' => WSDL_CACHE_NONE,
-			'encoding' => 'UTF-8',
-			'exceptions' => true,
-		);
-		$url = get_option('testmode') != 1 ? 'http://www.speedex.gr/accesspoint/accesspoint.asmx' : 'http://www.speedex.gr/AccessPointTest/AccessPoint.asmx';
-		$soap_client = new SoapClient( $url."?WSDL", $options );
+		
+		try {
+			$soap_client = $this->get_soap_client();
+		} catch ( Exception $e ) {
+			return array(
+				'status' => 'fail',
+				'message' => __( 'Failed to connect to Speedex API: ', 'woocommerce-speedex-cep' ) . $e->getMessage()
+			);
+		}
 		
 		$comments = isset( $_POST['voucher_comments'] ) ? sanitize_text_field( trim( $_POST['voucher_comments'] ) ) : '';
 		//$comments = $_POST['voucher_comments'] ;
 		
+		$address_1 = $order->get_shipping_address_1();
+		$address_2 = $order->get_shipping_address_2();
+		if ( ! empty( $address_2 ) ) {
+			$address_1 .= ' ' . $address_2;
+		}
+
+		// Define BOL object strictly according to wsdl/xml schema order
+		// Use credentials from settings strictly.
+		$customer_id = get_option( 'customer_id' );
+		$agreement_id = get_option( 'agreement_id' );
+
+		if ( empty( $customer_id ) || empty( $agreement_id ) ) {
+			// If not in settings, we can't proceed. Fallback only if absolutely necessary for legacy tests, 
+			// but better to ask user to fill settings.
+			if ( get_option( 'testmode' ) == 1 ) {
+				$customer_id = !empty($customer_id) ? $customer_id : 'DEMO';
+				$agreement_id = !empty($agreement_id) ? $agreement_id : '001';
+			} else {
+				return array(
+					'status' => 'fail',
+					'message' => __( 'Please enter Customer ID and Agreement ID in Speedex settings.', 'woocommerce-speedex-cep' )
+				);
+			}
+		}
+
+		// Define BOL object strictly according to wsdl/xml schema order
 		$bol_object_array = array(
-			'EnterBranchId' => ( get_option( 'testmode' ) != 1 ) ? get_option( 'branch_id' ) : '1000;0101', // Mandatory
-			'SND_Customer_Id' => ( get_option( 'testmode' ) != 1) ? get_option( 'customer_id' ) : 'PE145031', // Mandatory
-			'Snd_agreement_id' => ( get_option( 'testmode' ) != 1 ) ? get_option( 'agreement_id' ) : '88499', // Mandatory
-			'RCV_Name' => $order->get_shipping_first_name().' '.$order->get_shipping_last_name(), // Mandatory
-			'RCV_Addr1' => $order->get_shipping_address_1(), // Mandatory
-			'RCV_Addr2' => $order->get_shipping_address_2(),
-			'RCV_Zip_Code' => $order->get_shipping_postcode(), // Mandatory
-			'RCV_City' => $order->get_shipping_city(), // Mandatory
-			'RCV_Country' => $order->get_shipping_country(), // Mandatory
-			'RCV_Tel1' => $order->get_billing_phone(), // Mandatory
-			'Voucher_Weight' => 0, // Mandatory
-			'Pod_Amount_Cash' => ( strcmp( $order->get_payment_method(), 'cod' ) == 0 ) ? $order->get_total() : 0,
-			'Pod_Amount_Description' => 'M',
-			'Security_Value' => 0,
-			'Express_Delivery' => 0,
-			'Saturday_Delivery' => 0,
-			'Time_Limit' => 0,
+			'MasterId' => '',
+			'Members' => null, 
+			'Shipping_Agent' => '',
+			'No' => '',
+			'_cust_Flag' => (int)0,
+			'BranchBankCode' => '',
 			'Comments_2853_1' => sprintf( __( 'Order ID: %s','woocommerce-speedex-cep' ), $order->get_id() ),
-			'Voucher_Volume' => 0,
-			'PayCode_Flag' => 1,
-			'Items' => 1,
+			'Comments_2853_2' => '',
+			'Comments_2853_3' => '',
+			'Items' => (int)1,
 			'Paratiriseis_2853_1' => !empty( mb_substr( $comments, 0, 65, 'UTF-8') ) ? mb_substr( $comments, 0, 65, 'UTF-8') : '',
 			'Paratiriseis_2853_2' => !empty( mb_substr( $comments, 65, 65, 'UTF-8') ) ? mb_substr( $comments, 65, 65, 'UTF-8') : '',
 			'Paratiriseis_2853_3' => !empty( mb_substr( $comments, 130, 65, 'UTF-8') ) ? mb_substr( $comments, 130, 65, 'UTF-8') : '',
-			'_cust_Flag' => 0
+			'PayCode_Flag' => (int)1,
+			'Pod_Amount_Cash' => ( strcmp( $order->get_payment_method(), 'cod' ) == 0 ) ? (double)$order->get_total() : 0.0,
+			'Pod_Amount_Description' => 'M',
+			'RCV_Addr1' => $address_1,
+			'RCV_Zip_Code' => $order->get_shipping_postcode(),
+			'RCV_City' => $order->get_shipping_city(), 
+			'RCV_Country' => $order->get_shipping_country(),
+			'RCV_Name' => $order->get_shipping_first_name().' '.$order->get_shipping_last_name(),
+			'RCV_Tel1' => $order->get_billing_phone(),
+			'Saturday_Delivery' => (int)0,
+			'Security_Value' => (int)0,
+			'Snd_agreement_id' => strval( $agreement_id ),
+			'SND_Customer_Id' => strval( $customer_id ),
+			'Time_Limit' => '',
+			'voucher_code' => '',
+			'Voucher_Weight' => (double)0.1,
 		);
 		
 		if( empty( $bol_object_array['RCV_Name'] ) ) {
@@ -445,48 +499,84 @@ class WC_Speedex_CEP_Admin {
 				);
 			}
 			
-			$create_bol_response = $soap_client->CreateBOL( array( 'sessionID' => $session_id, 'inListPod' => array( $bol_object_array ), 'tableFlag' => 3 ) );
+			// Use associative key 'BOL' inside 'inListPod' array to ensure correct XML wrapping
+			$create_bol_response = $soap_client->CreateBOL( array( 
+				'sessionID' => $session_id, 
+				'inListPod' => array( 'BOL' => $bol_object_array ), 
+				'tableFlag' => 3 
+			) );
 			if ( $create_bol_response->returnCode != 1 ) {
+				$detailed_error = '';
+				
+				// Check statusList for specific errors
+				if ( isset( $create_bol_response->statusList ) ) {
+					$statusList = $create_bol_response->statusList;
+					if ( is_object( $statusList ) && isset( $statusList->string ) ) {
+						$detailed_error .= ' ' . $statusList->string;
+					} elseif ( is_array( $statusList ) ) {
+						// Fallback if it's an array or other structure
+						$detailed_error .= ' ' . json_encode( $statusList );
+					}
+				}
+
+				// Check outListPod for item-specific errors
+				if ( !empty( $create_bol_response->outListPod ) ) {
+					$pods = $create_bol_response->outListPod;
+					if ( ! is_array( $pods ) ) {
+						$pods = array( $pods );
+					}
+					foreach ( $pods as $pod ) {
+						if ( isset( $pod->returnMessage ) ) {
+							$detailed_error .= ' ' . $pod->returnMessage;
+						}
+					}
+				}
+
 				$this->destroySession( $session_id, $soap_client );
 				return array(
 					'status' => 'fail',
-					'message' => sprintf( __( 'Voucher creation failed. Error Code: %s Error Message: %s', 'woocommerce-speedex-cep' ), $create_bol_response->returnCode, $create_bol_response->returnMessage )
+					'message' => sprintf( __( 'Voucher creation failed. Error Code: %s Error Message: %s%s', 'woocommerce-speedex-cep' ), $create_bol_response->returnCode, $create_bol_response->returnMessage, $detailed_error )
 				);
 			} else {
-				$is_woocommerce_shipping_tracking_active = is_plugin_active( 'woocommerce-shipping-tracking/shipping-tracking.php' );
-				if ( ! ( function_exists( 'save_shippings_info_metas' ) || class_exists( 'WCST_Order' ) ) ) {
-					require_once( ABSPATH . '/wp-content/plugins/woocommerce-shipping-tracking/classes/com/WCST_Order.php' ); // Find better solution to find path
-				}
-				$wcst_order_model = $is_woocommerce_shipping_tracking_active ? new WCST_Order() : null;
 				$plural = 0;
-				foreach( $create_bol_response->outListPod as $response )
-				{
-					$plural++;
-					if( count( $response ) > 1 )
-					{
-						foreach( $response as $value )
-						{
-							$order->add_order_note( sprintf ( __( 'The newly created voucher code is: %s', 'woocommerce-speedex-cep' ), $value->voucher_code ));
-						}
+				if ( isset( $create_bol_response->outListPod->BOL ) ) {
+					$pods = $create_bol_response->outListPod->BOL;
+					if ( ! is_array( $pods ) ) {
+						$pods = array( $pods );
 					}
-					else{
-						if ( $is_woocommerce_shipping_tracking_active ) {
-							$data_to_save['_wcst_order_trackno'] = $response->voucher_code;
-							$data_to_save['_wcst_custom_text']='';
-							$data_to_save['_wcst_order_dispatch_date'] = current_time( 'Y-m-d' );
-							$data_to_save['_wcst_order_trackurl'] = '0';
-							$data_to_save['_wcst_order_disable_email'] = 'no';
-							$wcst_order_model->save_shippings_info_metas( $order_id, $data_to_save );
+					
+					foreach( $pods as $pod )
+					{
+						if ( isset( $pod->voucher_code ) && !empty( $pod->voucher_code ) ) {
+							$plural++;
+							$v_code = stripslashes( $pod->voucher_code );
+							
+							// Use WC_Order method for meta data to ensure HPOS compatibility
+							$order->add_meta_data( '_speedex_voucher_code', $v_code, false );
+							
+							if ( (int)get_option( 'sync_tracking' ) == 1 ) {
+								$order->update_meta_data( '_shipping_tracking_number', $v_code );
+							}
+
+							$order->save();
+							
+							$order->add_order_note( sprintf ( __( 'The newly created voucher code is: %s', 'woocommerce-speedex-cep' ), $v_code ));
 						}
-						
-						$order->add_meta_data( '_speedex_voucher_code', stripslashes( $response->voucher_code ) );
-						$order->save();
 					}
 				}
-				return array(
-					'status' => 'success',
-					'message' => _n( 'Voucher creation succeeded.', 'Vouchers creation succeeded.', $plural , 'woocommerce-speedex-cep' )
-				);
+				$this->destroySession( $session_id, $soap_client );
+				
+				if ( $plural > 0 ) {
+					return array(
+						'status' => 'success',
+						'message' => _n( 'Voucher creation succeeded.', 'Vouchers creation succeeded.', $plural , 'woocommerce-speedex-cep' )
+					);
+				} else {
+					return array(
+						'status' => 'fail',
+						'message' => __( 'Voucher creation failed: No voucher code was returned by Speedex API.', 'woocommerce-speedex-cep' )
+					);
+				}
 			}
 		}
 		catch ( Exception $e)
@@ -545,6 +635,40 @@ class WC_Speedex_CEP_Admin {
 		}	
 	}
 
+	function validateConnection()
+	{
+		if ( ! current_user_can( 'manage_woocommerce' ) ) {
+			wp_send_json_error( array( 'message' => __( 'Insufficient permissions.', 'woocommerce-speedex-cep' ) ) );
+		}
+
+		$username = isset( $_POST['username'] ) ? sanitize_text_field( $_POST['username'] ) : '';
+		$password = isset( $_POST['password'] ) ? sanitize_text_field( $_POST['password'] ) : '';
+		$testmode = isset( $_POST['testmode'] ) ? (int) $_POST['testmode'] : 0;
+
+		if ( empty( $username ) || empty( $password ) ) {
+			wp_send_json_error( array( 'message' => __( 'Username and password are required.', 'woocommerce-speedex-cep' ) ) );
+		}
+
+		// Temporarily override options for the session check
+		add_filter( 'pre_option_username', function() use ( $username ) { return $username; } );
+		add_filter( 'pre_option_password', function() use ( $password ) { return $password; } );
+		add_filter( 'pre_option_testmode', function() use ( $testmode ) { return $testmode; } );
+
+		try {
+			$soap_client = $this->get_soap_client();
+			$session_id_response = $this->getSession( $soap_client );
+
+			if ( $session_id_response['status'] === 'success' ) {
+				$this->destroySession( $session_id_response['session_id'], $soap_client );
+				wp_send_json_success( array( 'message' => __( 'Connection successful.', 'woocommerce-speedex-cep' ) ) );
+			} else {
+				wp_send_json_error( array( 'message' => $session_id_response['message'] ) );
+			}
+		} catch ( Exception $e ) {
+			wp_send_json_error( array( 'message' => $e->getMessage() ) );
+		}
+	}
+
 	function destroySession( $session_id, $soap_client_obj )
 	{
 		try { 
@@ -563,21 +687,52 @@ class WC_Speedex_CEP_Admin {
 
 	function speedex_add_meta_boxes()
 	{
-		add_meta_box( 'speedex_order_fields', __( 'Speedex','woocommerce-speedex-cep' ), array( $this, 'speedex_voucher_code_management_widget' ), 'shop_order', 'side', 'core' );
+		$screens = array( 
+			'shop_order', 
+			'edit-shop_order', 
+			'woocommerce_page_wc-orders', 
+			'woocommerce_page_wc-orders-edit',
+			'wc-orders' 
+		);
+		foreach ( $screens as $screen ) {
+			add_meta_box( 'speedex_order_fields', __( 'Speedex','woocommerce-speedex-cep' ), array( $this, 'speedex_voucher_code_management_widget' ), $screen, 'side', 'high' );
+		}
 	}
 
 
-	function speedex_voucher_code_management_widget()
+	function speedex_voucher_code_management_widget( $post_or_order )
 	{		
-		global $post;
-		$order_ob = wc_get_order($post->ID);
-		$meta_fields_data = $order_ob->get_meta( '_speedex_voucher_code', false );
+		if ( $post_or_order instanceof WP_Post ) {
+			$order_id = $post_or_order->ID;
+		} elseif ( is_numeric( $post_or_order ) ) {
+			$order_id = $post_or_order;
+		} elseif ( is_object( $post_or_order ) && method_exists( $post_or_order, 'get_id' ) ) {
+			$order_id = $post_or_order->get_id();
+		} else {
+			global $post;
+			$order_id = isset($post->ID) ? $post->ID : 0;
+		}
+
+		if ( !$order_id ) {
+			return;
+		}
+
+		$order_ob = wc_get_order( $order_id );
+		if ( ! $order_ob ) {
+			return;
+		}
 		
-		$shipping_method_id = array();
+		$meta_fields_data = get_post_meta( $order_id, '_speedex_voucher_code', false );
+		if ( empty( $meta_fields_data ) && is_callable( array( $order_ob, 'get_meta' ) ) ) {
+			$meta_fields_data = $order_ob->get_meta( '_speedex_voucher_code', false );
+		}
+		
+		/* debug info removed */
+
+		$shipping_method_id = '';
 		$sel_methods = get_option('methods');
 		foreach( $order_ob->get_items( 'shipping' ) as $item_id => $shipping_item_obj ){
 			$shipping_method_id = $shipping_item_obj->get_method_id(); // The method ID
-			
 			if( $shipping_method_id ){
 				$shipping_method_id = ( strpos( $shipping_method_id, ':' ) === false ) ? $shipping_method_id : substr( $shipping_method_id, 0, strpos( $shipping_method_id, ':' ) );
 				break;
@@ -585,17 +740,17 @@ class WC_Speedex_CEP_Admin {
 		}
 		
 		if( !$sel_methods || !in_array( $shipping_method_id, $sel_methods )){
-			_e( 'Voucher creation is not available for the selected shipping method of this order.', 'woocommerce-speedex-cep' );
+			echo esc_html__( 'Voucher creation is not available for the selected shipping method of this order.', 'woocommerce-speedex-cep' );
 		}
 		else {
-			if( empty( $meta_fields_data ) || !isset( $meta_fields_data ) ) {
+			if( empty( $meta_fields_data ) ) {
 				?><div id="wc_speedex_cep_vouchers">
 					<ul class="totals">
 						<li>
-							<label  style="display:block; clear:both; font-weight:bold;"><?php _e( 'No vouchers exists for this order.','woocommerce-speedex-cep' ); ?></label>
+							<label  style="display:block; clear:both; font-weight:bold;"><?php echo esc_html__( 'No vouchers exists for this order.','woocommerce-speedex-cep' ); ?></label>
 						</li>
 						<li>
-							<input type="button" class="button generate-items manually_create_voucher" value="<?php _e( 'Create a New Voucher', 'woocommerce-speedex-cep' ); ?>"  name="manually_create_voucher" />
+							<input type="button" class="button generate-items manually_create_voucher" value="<?php echo esc_attr__( 'Create a New Voucher', 'woocommerce-speedex-cep' ); ?>"  name="manually_create_voucher" />
 						</li>
 						<?php $this->advancedBolCreationOptionsHTML(); ?>
 					</ul>
@@ -603,27 +758,33 @@ class WC_Speedex_CEP_Admin {
 			}
 			else
 			{
-				?><div id="wc_speedex_cep_vouchers"> <?php
-				foreach( $meta_fields_data as $meta_field )
+				?>
+				<div id="wc_speedex_cep_vouchers">
+				<?php
+				foreach( $meta_fields_data as $voucher_code )
 				{
-					$voucher_code = $meta_field->__get( "value" );
+					if ( is_object( $voucher_code ) && isset( $voucher_code->value ) ) {
+						$voucher_code = $voucher_code->value;
+					}
+					
+					if ( empty( $voucher_code ) ) continue;
 					?>
 					<div class="wc_speedex_cep_voucher_box">
 						<ul class="totals">
 							<li>
-								<label style="display:block; clear:both; font-weight:bold;"><?php echo sprintf( __( 'Voucher: %s', 'woocommerce-speedex-cep' ), $voucher_code ); ?></label>
+								<label style="display:block; clear:both; font-weight:bold;"><?php echo sprintf( esc_html__( 'Voucher: %s', 'woocommerce-speedex-cep' ), esc_html( $voucher_code ) ); ?></label>
 							</li>
 							<li>
-								<input id="woocommerce-speedex-cep-cancel-voucher" type="button" class="button button-primary cancel_voucher" data-voucher-code="<?php echo $voucher_code; ?>" value="<?php _e( 'Cancel Voucher', 'woocommerce-speedex-cep' ); ?>" name="cancel_voucher" />
+								<input id="woocommerce-speedex-cep-cancel-voucher" type="button" class="button button-primary cancel_voucher" data-voucher-code="<?php echo esc_attr( $voucher_code ); ?>" value="<?php echo esc_attr__( 'Cancel Voucher', 'woocommerce-speedex-cep' ); ?>" name="cancel_voucher" />
 							</li>
 							<li>
-								<input id="woocommerce-speedex-cep-download-voucher" type="button" class="button generate-items download_voucher" data-voucher-code="<?php echo $voucher_code; ?>" value="<?php _e( 'Download Voucher', 'woocommerce-speedex-cep' ); ?>"  name="download_voucher" />
+								<input id="woocommerce-speedex-cep-download-voucher" type="button" class="button generate-items download_voucher" data-voucher-code="<?php echo esc_attr( $voucher_code ); ?>" value="<?php echo esc_attr__( 'Download Voucher', 'woocommerce-speedex-cep' ); ?>"  name="download_voucher" />
 							</li>
 						</ul>
 					</div>
 					<?php
 				}?>
-				<input id="woocommerce-speedex-cep-manually-create-voucher" type="button" class="button generate-items manually_create_voucher" style="margin-bottom: 6px;" value="<?php _e( 'Create a New Voucher', 'woocommerce-speedex-cep' ); ?>"  name="manually_create_voucher" />
+				<input id="woocommerce-speedex-cep-manually-create-voucher" type="button" class="button generate-items manually_create_voucher" style="margin-bottom: 6px;" value="<?php echo esc_attr__( 'Create a New Voucher', 'woocommerce-speedex-cep' ); ?>"  name="manually_create_voucher" />
 				<?php $this->advancedBolCreationOptionsHTML(); ?>
 				</div><?php
 			}

@@ -1,11 +1,11 @@
 <?php
 /* 
-  Plugin Name: Speedex courier integration for Wocommerce
-  Plugin URI: ''
-  Description: Provides interface with Speedex web service API for Woocommerce
+  Plugin Name: Speedex Voucher for WooCommerce
+  Plugin URI: 'webdesires.gr'
+  Description: Το πρόσθετο Speedex Voucher for WooCommerce σας επιτρέπει να δημιουργήσετε και να τυπώσετε εύκολα και γρήγορα vouchers για την Speedex μέσω του WooCommerce, καθώς και να ενημερώνεστε εσείς και οι πελάτες σας για την κατάσταση της παραγγελίας.
   Version: 1.0.0
-  Author: 'Vasilis Pantelis'
-  Author URI: ''
+  Author: Webdesires
+  Author URI: 'webdesires.gr'
   License:           GPL-3.0+
   License URI:       http://www.gnu.org/licenses/gpl-3.0.txt
  */
@@ -19,20 +19,19 @@ if ( ! class_exists ( 'WC_Speedex_CEP' ) ) {
 
 		function __construct() {
 			add_action( 'init', array( $this, 'load_plugin_textdomain' ) );
+			add_action( 'init', array( $this, 'include_files' ), 20 );
+		}
+		
+		function include_files() {
 			if ( class_exists( 'WooCommerce' ) ) {
-
+				require_once( 'includes/class-woocommerce-speedex-cep-speedex-interface.php' );
+				
 				if ( is_admin() ) {
-					include_once( 'includes/class-woocommerce-speedex-cep-speedex-interface.php' );
-					include_once( 'includes/class-woocommerce-speedex-cep-settings.php' );
+					require_once( 'includes/class-woocommerce-speedex-cep-settings.php' );
 				}
-
-				//include_once( 'includes/class-wc-additional-variation-images-frontend.php' );
 			} else {
-
 				add_action( 'admin_notices', array( $this, 'woocommerce_missing_notice' ) );
-
 			}
-			return true;
 		}
 		
 		public function load_plugin_textdomain() {
@@ -57,4 +56,4 @@ if ( ! class_exists ( 'WC_Speedex_CEP' ) ) {
 		new WC_Speedex_CEP();
 		return true;
 	}
-}//endif;
+}
